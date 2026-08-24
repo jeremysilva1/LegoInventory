@@ -1,2 +1,2 @@
-# LegoInventory
+# LeegoInventory
 LegoInventory
