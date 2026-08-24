@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<title>LEGO Scanner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+<style>
+  :root{
+    --bg: #15120e;
+    --bg-raised: #241d16;
+    --card: #2a231a;
+    --card-border: #4f4433;
+    --tag-yellow: #ffc94a;
+    --tag-yellow-dim: #a3822f;
+    --text: #ffffff;
+    --text-dim: #d8cfbe;
+    --text-faint: #a89a80;
+    --green: #8fcc7a;
+    --red-flag: #e8806a;
+    --blue: #7ab8e0;
+    --mono: 'SF Mono', 'Roboto Mono', 'Courier New', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100%; overscroll-behavior: none; }
+
+  .hidden { display: none !important; }
+
+  /* ---------- Login ---------- */
+  #loginScreen {
+    min-height: 100vh; display: flex; flex-direction: column; justify-content: center;
+    padding: 24px; gap: 14px;
+  }
+  .brand-logo { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--tag-yellow); font-weight: 700; text-align: center; margin-bottom: 24px; }
+  .login-input {
+    width: 100%; background: var(--bg-raised); border: 1px solid var(--card-border);
+    border-radius: 9px; padding: 14px; font-size: 16px; color: var(--text); font-family: var(--sans);
+  }
+  .login-input:focus { outline: none; border-color: var(--tag-yellow); }
+  .login-btn {
+    width: 100%; padding: 14px; border-radius: 9px; border: none;
+    background: var(--tag-yellow); color: #1a1508; font-size: 16px; font-weight: 700; cursor: pointer;
+  }
+  .login-error { color: var(--red-flag); font-size: 13px; text-align: center; min-height: 18px; }
+
+  /* ---------- Header ---------- */
+  .header { position: sticky; top: 0; z-index: 20; background: var(--bg); border-bottom: 1px solid var(--card-border); padding: 14px 16px 10px; }
+  .brand-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .brand { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--tag-yellow); font-weight: 700; }
+  .logout-btn { font-size: 11px; color: var(--text-faint); background: none; border: none; cursor: pointer; text-decoration: underline; }
+  .stats-row { display: flex; gap: 8px; }
+  .stat { flex: 1; background: var(--bg-raised); border: 1px solid var(--card-border); border-radius: 8px; padding: 8px 10px; }
+  .stat-num { font-family: var(--mono); font-size: 18px; font-weight: 700; color: var(--text); line-height: 1.1; }
+  .stat-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); margin-top: 2px; }
+
+  /* ---------- Scan button ---------- */
+  .scan-wrap { padding: 16px; }
+  .scan-btn {
+    width: 100%; padding: 22px; border-radius: 14px; border: 2px dashed var(--tag-yellow-dim);
+    background: var(--bg-raised); color: var(--tag-yellow); font-size: 17px; font-weight: 700;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;
+  }
+  .scan-btn .icon { font-size: 22px; }
+  .manual-btn {
+    width: 100%; margin-top: 8px; padding: 12px; border-radius: 9px; border: 1px solid var(--card-border);
+    background: transparent; color: var(--text-dim); font-size: 13px; cursor: pointer;
+  }
+
+  /* ---------- Camera overlay ---------- */
+  #cameraOverlay { position: fixed; inset: 0; z-index: 50; background: #000; display: flex; flex-direction: column; }
+  #interactive { position: relative; flex: 1; overflow: hidden; }
+  #interactive video, #interactive canvas { width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0; }
+  .scan-frame {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: 82%; height: 90px; border: 2px solid var(--tag-yellow); border-radius: 10px;
+    box-shadow: 0 0 0 2000px rgba(0,0,0,0.45); pointer-events: none;
+  }
+  .camera-bar { padding: 16px; display: flex; gap: 10px; background: #000; }
+  .camera-bar button {
+    flex: 1; padding: 14px; border-radius: 9px; border: 1px solid var(--card-border);
+    background: var(--bg-raised); color: var(--text); font-size: 15px; cursor: pointer;
+  }
+  .camera-hint { position: absolute; bottom: 90px; left: 0; right: 0; text-align: center; color: #fff; font-size: 13px; font-family: var(--mono); text-shadow: 0 1px 4px rgba(0,0,0,0.8); }
+
+  /* ---------- Result sheet ---------- */
+  .sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: flex-end; z-index: 60; }
+  .sheet-backdrop.show { display: flex; }
+  .sheet { width: 100%; max-height: 90vh; overflow-y: auto; background: var(--bg-raised); border-top: 1px solid var(--card-border); border-radius: 16px 16px 0 0; padding: 20px 18px calc(20px + env(safe-area-inset-bottom)); }
+  .sheet-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); margin-bottom: 4px; }
+  .lookup-status { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .spinner { width: 14px; height: 14px; border: 2px solid var(--card-border); border-top-color: var(--tag-yellow); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .field-label { font-size: 12px; color: var(--text-faint); margin: 12px 0 6px; }
+  .field-input {
+    width: 100%; background: var(--bg); border: 1px solid var(--card-border); border-radius: 9px;
+    padding: 12px; font-size: 16px; color: var(--text); font-family: var(--sans);
+  }
+  .field-input:focus { outline: none; border-color: var(--tag-yellow); }
+  .set-badge { font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--tag-yellow); }
+  .prior-hint { font-size: 11.5px; color: var(--text-faint); margin-top: 4px; }
+
+  .stepper { display: flex; align-items: center; gap: 10px; }
+  .stepper-btn { width: 46px; height: 46px; border-radius: 9px; border: 1px solid var(--card-border); background: var(--bg); color: var(--tag-yellow); font-size: 22px; cursor: pointer; }
+  .stepper-input { flex: 1; text-align: center; font-size: 22px; font-family: var(--mono); font-weight: 700; background: var(--bg); border: 1px solid var(--card-border); border-radius: 9px; padding: 10px; color: var(--text); }
+
+  .quick-locs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .quick-loc { font-family: var(--mono); font-size: 12px; padding: 6px 10px; border-radius: 6px; background: var(--bg); border: 1px solid var(--card-border); color: var(--text-dim); cursor: pointer; }
+  .quick-loc.active { background: var(--tag-yellow); color: #1a1508; border-color: var(--tag-yellow); font-weight: 700; }
+
+  .sheet-row { display: flex; gap: 10px; margin-top: 18px; }
+  .sheet-btn { flex: 1; padding: 13px; border-radius: 9px; border: none; font-size: 15px; font-weight: 600; cursor: pointer; }
+  .sheet-btn.save { background: var(--tag-yellow); color: #1a1508; }
+  .sheet-btn.cancel { background: transparent; color: var(--text-dim); border: 1px solid var(--card-border); }
+  .save-msg { text-align: center; font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  .save-msg.ok { color: var(--green); }
+  .save-msg.err { color: var(--red-flag); }
+
+  /* ---------- Recent list ---------- */
+  .recent-header { padding: 4px 16px 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+  .recent-list { padding: 0 12px 100px; }
+  .recent-item {
+    background: var(--card); border: 1px solid var(--card-border); border-radius: 10px;
+    margin-bottom: 8px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center;
+  }
+  .recent-set { font-family: var(--mono); font-weight: 700; color: var(--tag-yellow); font-size: 15px; }
+  .recent-name { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+  .recent-meta { text-align: right; font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
+  .recent-loc { color: var(--blue); }
+  .empty-hint { text-align: center; color: var(--text-faint); padding: 40px 20px; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginScreen">
+  <div class="brand-logo">LEGO Storage Scanner</div>
+  <input class="login-input" id="loginEmail" type="email" placeholder="Email" autocomplete="username">
+  <input class="login-input" id="loginPassword" type="password" placeholder="Password" autocomplete="current-password">
+  <button class="login-btn" id="loginBtn">Sign In</button>
+  <div class="login-error" id="loginError"></div>
+</div>
+
+<!-- MAIN APP -->
+<div id="mainApp" class="hidden">
+  <div class="header">
+    <div class="brand-row">
+      <div class="brand">LEGO Scanner</div>
+      <button class="logout-btn" id="logoutBtn">Sign out</button>
+    </div>
+    <div class="stats-row">
+      <div class="stat"><div class="stat-num" id="statToday">0</div><div class="stat-label">Scanned Today</div></div>
+      <div class="stat"><div class="stat-num" id="statUnits">0</div><div class="stat-label">Units Logged</div></div>
+    </div>
+  </div>
+
+  <div class="scan-wrap">
+    <button class="scan-btn" id="scanBtn"><span class="icon">📷</span> Scan Barcode</button>
+    <button class="manual-btn" id="manualBtn">＋ Enter a set manually instead</button>
+  </div>
+
+  <div class="recent-header">Recent scans (this session)</div>
+  <div class="recent-list" id="recentList">
+    <div class="empty-hint">Nothing scanned yet — tap "Scan Barcode" to start.</div>
+  </div>
+</div>
+
+<!-- CAMERA OVERLAY -->
+<div id="cameraOverlay" class="hidden">
+  <div id="interactive" class="viewport">
+    <div class="scan-frame"></div>
+    <div class="camera-hint">Align barcode within the frame</div>
+  </div>
+  <div class="camera-bar">
+    <button id="cancelScanBtn">Cancel</button>
+  </div>
+</div>
+
+<!-- RESULT / ENTRY SHEET -->
+<div class="sheet-backdrop" id="sheetBackdrop">
+  <div class="sheet">
+    <div class="sheet-title">Barcode</div>
+    <div class="set-badge" id="scannedUpc">—</div>
+    <div class="lookup-status" id="lookupStatus"></div>
+
+    <div class="field-label">LEGO set number</div>
+    <input class="field-input" id="setNumInput" placeholder="e.g. 75318" inputmode="numeric">
+    <div class="prior-hint" id="priorHint"></div>
+
+    <div class="field-label">Set name</div>
+    <input class="field-input" id="setNameInput" placeholder="e.g. Star Wars The Child">
+
+    <div class="field-label">Quantity counted</div>
+    <div class="stepper">
+      <button class="stepper-btn" id="qtyDown">−</button>
+      <input class="stepper-input" id="qtyInput" type="number" inputmode="numeric" value="1">
+      <button class="stepper-btn" id="qtyUp">+</button>
+    </div>
+
+    <div class="field-label">Storage location</div>
+    <input class="field-input" id="locInput" placeholder="e.g. 3269, or BC1">
+    <div class="quick-locs" id="quickLocs"></div>
+
+    <div class="sheet-row">
+      <button class="sheet-btn cancel" id="sheetCancel">Cancel</button>
+      <button class="sheet-btn save" id="sheetSave">Save Count</button>
+    </div>
+    <div class="save-msg" id="saveMsg"></div>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://qjgohrxnqkziygedvjbl.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFqZ29ocnhucWt6aXlnZWR2amJsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc0NDU2NTksImV4cCI6MjEwMzAyMTY1OX0.j_-3_TD6iSOY3Pk5fNcqxuB4dUGB5UBkFpjnxKtozj0';
+const QUICK_LOCATIONS = ["3269", "3283", "BC1", "BC2", "HC1", "HC2", "EC1"];
+
+let session = null; // { access_token, refresh_token, expires_at }
+let sessionsToday = 0;
+let unitsLogged = 0;
+let recentScans = [];
+let currentUpc = null;
+
+// ---------------- Auth ----------------
+async function loadSession() {
+  try {
+    const stored = await window.storage.get('supabase_session', false);
+    if (stored && stored.value) {
+      const s = JSON.parse(stored.value);
+      if (s.expires_at > Date.now() / 1000) {
+        session = s;
+        showMain();
+        return;
+      } else if (s.refresh_token) {
+        const ok = await refreshSession(s.refresh_token);
+        if (ok) { showMain(); return; }
+      }
+    }
+  } catch (e) {}
+  showLogin();
+}
+
+async function saveSession(s) {
+  session = s;
+  try { await window.storage.set('supabase_session', JSON.stringify(s), false); } catch (e) {}
+}
+
+async function refreshSession(refresh_token) {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+      body: JSON.stringify({ refresh_token })
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    await saveSession({
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: Date.now() / 1000 + data.expires_in
+    });
+    return true;
+  } catch (e) { return false; }
+}
+
+function showLogin() {
+  document.getElementById('loginScreen').classList.remove('hidden');
+  document.getElementById('mainApp').classList.add('hidden');
+}
+function showMain() {
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('mainApp').classList.remove('hidden');
+  refreshQuickLocs();
+  updateStats();
+}
+
+document.getElementById('loginBtn').addEventListener('click', async () => {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = '';
+  if (!email || !password) { errEl.textContent = 'Enter email and password.'; return; }
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error_description || data.msg || 'Sign-in failed.'; return; }
+    await saveSession({
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: Date.now() / 1000 + data.expires_in
+    });
+    showMain();
+  } catch (e) { errEl.textContent = 'Network error. Try again.'; }
+});
+
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+  try { await window.storage.delete('supabase_session', false); } catch (e) {}
+  session = null;
+  showLogin();
+});
+
+// ---------------- Supabase REST helpers ----------------
+async function sbFetch(path, options = {}) {
+  const headers = Object.assign({
+    'apikey': SUPABASE_ANON_KEY,
+    'Authorization': `Bearer ${session.access_token}`,
+    'Content-Type': 'application/json'
+  }, options.headers || {});
+  return fetch(`${SUPABASE_URL}/rest/v1/${path}`, Object.assign({}, options, { headers }));
+}
+
+async function upsertSet(setNumber, name) {
+  await sbFetch('sets', {
+    method: 'POST',
+    headers: { 'Prefer': 'resolution=merge-duplicates' },
+    body: JSON.stringify([{ set_number: setNumber, name: name || setNumber }])
+  });
+}
+
+async function fetchPriorCount(setNumber) {
+  try {
+    const res = await sbFetch(`latest_physical_count?set_number=eq.${encodeURIComponent(setNumber)}&select=counted_qty,location,counted_at`);
+    const data = await res.json();
+    return data[0] || null;
+  } catch (e) { return null; }
+}
+
+async function fetchPurchasedQty(setNumber) {
+  try {
+    const res = await sbFetch(`inventory_status?set_number=eq.${encodeURIComponent(setNumber)}&select=total_purchased,name`);
+    const data = await res.json();
+    return data[0] || null;
+  } catch (e) { return null; }
+}
+
+async function saveCountEvent(setNumber, qty, location) {
+  const res = await sbFetch('physical_count_events', {
+    method: 'POST',
+    headers: { 'Prefer': 'return=representation' },
+    body: JSON.stringify([{
+      set_number: setNumber,
+      counted_qty: qty,
+      location: location || null,
+      session_label: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    }])
+  });
+  return res.ok;
+}
+
+// ---------------- UPC lookup ----------------
+function extractSetNumber(title) {
+  if (!title) return null;
+  const matches = [...title.matchAll(/\b(\d{4,7})\b/g)];
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const num = matches[i][0];
+    const tail = title.slice(matches[i].index + num.length, matches[i].index + num.length + 12);
+    if (/^\s*,?\s*[Pp]iece/.test(tail)) continue;
+    return num;
+  }
+  return null;
+}
+
+async function lookupUpc(upc) {
+  try {
+    const res = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(upc)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.items && data.items.length > 0) {
+      const item = data.items[0];
+      return { title: item.title, brand: item.brand };
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ---------------- Camera / scanning ----------------
+let scannerRunning = false;
+
+function startCamera() {
+  document.getElementById('cameraOverlay').classList.remove('hidden');
+  Quagga.init({
+    inputStream: {
+      type: 'LiveStream',
+      target: document.querySelector('#interactive'),
+      constraints: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    },
+    decoder: { readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader'] },
+    locate: true
+  }, function(err) {
+    if (err) {
+      alert('Camera could not start: ' + err.message + '\n\nTry entering the set manually instead.');
+      closeCamera();
+      return;
+    }
+    Quagga.start();
+    scannerRunning = true;
+  });
+
+  Quagga.onDetected(onBarcodeDetected);
+}
+
+function closeCamera() {
+  if (scannerRunning) {
+    Quagga.offDetected(onBarcodeDetected);
+    Quagga.stop();
+    scannerRunning = false;
+  }
+  document.getElementById('cameraOverlay').classList.add('hidden');
+}
+
+function onBarcodeDetected(result) {
+  const code = result.codeResult.code;
+  if (!code) return;
+  closeCamera();
+  openResultSheet(code);
+}
+
+document.getElementById('scanBtn').addEventListener('click', startCamera);
+document.getElementById('cancelScanBtn').addEventListener('click', closeCamera);
+document.getElementById('manualBtn').addEventListener('click', () => openResultSheet(null));
+
+// ---------------- Result sheet ----------------
+async function openResultSheet(upc) {
+  currentUpc = upc;
+  document.getElementById('scannedUpc').textContent = upc || 'Manual entry';
+  document.getElementById('setNumInput').value = '';
+  document.getElementById('setNameInput').value = '';
+  document.getElementById('qtyInput').value = 1;
+  document.getElementById('locInput').value = '';
+  document.getElementById('priorHint').textContent = '';
+  document.getElementById('saveMsg').textContent = '';
+  document.getElementById('saveMsg').className = 'save-msg';
+  refreshQuickLocs();
+  document.getElementById('sheetBackdrop').classList.add('show');
+
+  if (upc) {
+    const statusEl = document.getElementById('lookupStatus');
+    statusEl.innerHTML = '<span class="spinner"></span> Looking up product…';
+    const result = await lookupUpc(upc);
+    if (result) {
+      const setNum = extractSetNumber(result.title);
+      if (setNum) {
+        document.getElementById('setNumInput').value = setNum;
+        document.getElementById('setNameInput').value = result.title.replace(/^LEGO[®\s]*/i, '').slice(0, 80);
+        statusEl.textContent = '✓ Found: ' + result.title.slice(0, 60);
+        checkPrior(setNum);
+      } else {
+        statusEl.textContent = 'Found a product but no set number in the title — check below.';
+        document.getElementById('setNameInput').value = result.title.slice(0, 80);
+      }
+    } else {
+      statusEl.textContent = 'No match found online — enter the set number manually.';
+    }
+  } else {
+    document.getElementById('lookupStatus').textContent = '';
+  }
+}
+
+document.getElementById('setNumInput').addEventListener('blur', (e) => {
+  const v = e.target.value.trim();
+  if (v) checkPrior(v);
+});
+
+async function checkPrior(setNum) {
+  const [prior, purchased] = await Promise.all([fetchPriorCount(setNum), fetchPurchasedQty(setNum)]);
+  let parts = [];
+  if (purchased && purchased.total_purchased) parts.push(`${purchased.total_purchased} purchased per records`);
+  if (prior && prior.counted_qty != null) parts.push(`last counted ${prior.counted_qty}${prior.location ? ' @ ' + prior.location : ''}`);
+  document.getElementById('priorHint').textContent = parts.join(' · ') || 'No prior history for this set.';
+  if (!document.getElementById('setNameInput').value && purchased && purchased.name && purchased.name !== 'LEGO') {
+    document.getElementById('setNameInput').value = purchased.name;
+  }
+}
+
+function refreshQuickLocs() {
+  const wrap = document.getElementById('quickLocs');
+  wrap.innerHTML = QUICK_LOCATIONS.map(l => `<span class="quick-loc" data-val="${l}">${l}</span>`).join('');
+  wrap.querySelectorAll('.quick-loc').forEach(el => {
+    el.addEventListener('click', () => {
+      document.getElementById('locInput').value = el.getAttribute('data-val');
+      wrap.querySelectorAll('.quick-loc').forEach(x => x.classList.remove('active'));
+      el.classList.add('active');
+    });
+  });
+}
+
+document.getElementById('qtyDown').addEventListener('click', () => {
+  const inp = document.getElementById('qtyInput');
+  inp.value = Math.max(0, (parseInt(inp.value, 10) || 0) - 1);
+});
+document.getElementById('qtyUp').addEventListener('click', () => {
+  const inp = document.getElementById('qtyInput');
+  inp.value = (parseInt(inp.value, 10) || 0) + 1;
+});
+
+document.getElementById('sheetCancel').addEventListener('click', () => {
+  document.getElementById('sheetBackdrop').classList.remove('show');
+});
+
+document.getElementById('sheetSave').addEventListener('click', async () => {
+  const setNum = document.getElementById('setNumInput').value.trim();
+  const setName = document.getElementById('setNameInput').value.trim();
+  const qty = parseInt(document.getElementById('qtyInput').value, 10) || 0;
+  const loc = document.getElementById('locInput').value.trim();
+  const msgEl = document.getElementById('saveMsg');
+
+  if (!setNum) {
+    msgEl.textContent = 'Enter a set number first.';
+    msgEl.className = 'save-msg err';
+    return;
+  }
+
+  msgEl.textContent = 'Saving…';
+  msgEl.className = 'save-msg';
+
+  await upsertSet(setNum, setName);
+  const ok = await saveCountEvent(setNum, qty, loc);
+
+  if (ok) {
+    msgEl.textContent = 'Saved!';
+    msgEl.className = 'save-msg ok';
+    recentScans.unshift({ setNum, setName, qty, loc, time: new Date() });
+    sessionsToday++;
+    unitsLogged += qty;
+    updateStats();
+    renderRecent();
+    setTimeout(() => { document.getElementById('sheetBackdrop').classList.remove('show'); }, 600);
+  } else {
+    msgEl.textContent = 'Save failed — check your connection and try again.';
+    msgEl.className = 'save-msg err';
+  }
+});
+
+function updateStats() {
+  document.getElementById('statToday').textContent = sessionsToday;
+  document.getElementById('statUnits').textContent = unitsLogged;
+}
+
+function renderRecent() {
+  const list = document.getElementById('recentList');
+  if (recentScans.length === 0) {
+    list.innerHTML = '<div class="empty-hint">Nothing scanned yet — tap "Scan Barcode" to start.</div>';
+    return;
+  }
+  list.innerHTML = recentScans.map(s => `
+    <div class="recent-item">
+      <div>
+        <div class="recent-set">${s.setNum}</div>
+        <div class="recent-name">${s.setName || ''}</div>
+      </div>
+      <div class="recent-meta">
+        <div>× ${s.qty}</div>
+        <div class="recent-loc">${s.loc || '—'}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+loadSession();
+</script>
+</body>
+</html>
