@@ -389,7 +389,12 @@ function extractSetNumber(title) {
 
 async function lookupUpc(upc) {
   try {
-    const res = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(upc)}`);
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/upc-lookup?upc=${encodeURIComponent(upc)}`, {
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${session.access_token}`
+      }
+    });
     if (!res.ok) return null;
     const data = await res.json();
     if (data.items && data.items.length > 0) {
