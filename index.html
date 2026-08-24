@@ -202,6 +202,10 @@
     <input class="field-input" id="locInput" placeholder="e.g. 3269, or BC1">
     <div class="quick-locs" id="quickLocs"></div>
 
+    <div class="field-label">Box / bin label <span style="color:var(--text-faint); font-weight:400;">(optional)</span></div>
+    <input class="field-input" id="boxInput" placeholder="e.g. Spider1">
+    <div class="quick-locs" id="quickBoxes"></div>
+
     <div class="sheet-row">
       <button class="sheet-btn cancel" id="sheetCancel">Cancel</button>
       <button class="sheet-btn save" id="sheetSave">Save Count</button>
@@ -272,6 +276,7 @@ function showMain() {
   document.getElementById('mainApp').classList.remove('hidden');
   refreshQuickLocs();
   updateStats();
+  loadKnownBoxLabels();
 }
 
 document.getElementById('loginBtn').addEventListener('click', async () => {
@@ -323,7 +328,7 @@ async function upsertSet(setNumber, name) {
 
 async function fetchPriorCount(setNumber) {
   try {
-    const res = await sbFetch(`latest_physical_count?set_number=eq.${encodeURIComponent(setNumber)}&select=counted_qty,location,counted_at`);
+    const res = await sbFetch(`latest_physical_count?set_number=eq.${encodeURIComponent(setNumber)}&select=counted_qty,location,box_label,counted_at`);
     const data = await res.json();
     return data[0] || null;
   } catch (e) { return null; }
@@ -337,7 +342,7 @@ async function fetchPurchasedQty(setNumber) {
   } catch (e) { return null; }
 }
 
-async function saveCountEvent(setNumber, qty, location) {
+async function saveCountEvent(setNumber, qty, location, boxLabel) {
   const res = await sbFetch('physical_count_events', {
     method: 'POST',
     headers: { 'Prefer': 'return=representation' },
@@ -345,10 +350,28 @@ async function saveCountEvent(setNumber, qty, location) {
       set_number: setNumber,
       counted_qty: qty,
       location: location || null,
+      box_label: boxLabel || null,
       session_label: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
     }])
   });
   return res.ok;
+}
+
+let knownBoxLabels = [];
+async function loadKnownBoxLabels() {
+  try {
+    const res = await sbFetch('physical_count_events?select=box_label&box_label=not.is.null&order=counted_at.desc&limit=200');
+    const data = await res.json();
+    const seen = new Set();
+    knownBoxLabels = [];
+    for (const row of data) {
+      if (row.box_label && !seen.has(row.box_label)) {
+        seen.add(row.box_label);
+        knownBoxLabels.push(row.box_label);
+      }
+      if (knownBoxLabels.length >= 10) break;
+    }
+  } catch (e) { knownBoxLabels = []; }
 }
 
 // ---------------- UPC lookup ----------------
@@ -433,10 +456,12 @@ async function openResultSheet(upc) {
   document.getElementById('setNameInput').value = '';
   document.getElementById('qtyInput').value = 1;
   document.getElementById('locInput').value = '';
+  document.getElementById('boxInput').value = '';
   document.getElementById('priorHint').textContent = '';
   document.getElementById('saveMsg').textContent = '';
   document.getElementById('saveMsg').className = 'save-msg';
   refreshQuickLocs();
+  refreshQuickBoxes();
   document.getElementById('sheetBackdrop').classList.add('show');
 
   if (upc) {
@@ -471,7 +496,12 @@ async function checkPrior(setNum) {
   const [prior, purchased] = await Promise.all([fetchPriorCount(setNum), fetchPurchasedQty(setNum)]);
   let parts = [];
   if (purchased && purchased.total_purchased) parts.push(`${purchased.total_purchased} purchased per records`);
-  if (prior && prior.counted_qty != null) parts.push(`last counted ${prior.counted_qty}${prior.location ? ' @ ' + prior.location : ''}`);
+  if (prior && prior.counted_qty != null) {
+    let where = '';
+    if (prior.location) where += ' @ ' + prior.location;
+    if (prior.box_label) where += ' (' + prior.box_label + ')';
+    parts.push(`last counted ${prior.counted_qty}${where}`);
+  }
   document.getElementById('priorHint').textContent = parts.join(' · ') || 'No prior history for this set.';
   if (!document.getElementById('setNameInput').value && purchased && purchased.name && purchased.name !== 'LEGO') {
     document.getElementById('setNameInput').value = purchased.name;
@@ -484,6 +514,19 @@ function refreshQuickLocs() {
   wrap.querySelectorAll('.quick-loc').forEach(el => {
     el.addEventListener('click', () => {
       document.getElementById('locInput').value = el.getAttribute('data-val');
+      wrap.querySelectorAll('.quick-loc').forEach(x => x.classList.remove('active'));
+      el.classList.add('active');
+    });
+  });
+}
+
+function refreshQuickBoxes() {
+  const wrap = document.getElementById('quickBoxes');
+  if (!knownBoxLabels.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = knownBoxLabels.map(l => `<span class="quick-loc" data-val="${l}">${l}</span>`).join('');
+  wrap.querySelectorAll('.quick-loc').forEach(el => {
+    el.addEventListener('click', () => {
+      document.getElementById('boxInput').value = el.getAttribute('data-val');
       wrap.querySelectorAll('.quick-loc').forEach(x => x.classList.remove('active'));
       el.classList.add('active');
     });
@@ -508,6 +551,7 @@ document.getElementById('sheetSave').addEventListener('click', async () => {
   const setName = document.getElementById('setNameInput').value.trim();
   const qty = parseInt(document.getElementById('qtyInput').value, 10) || 0;
   const loc = document.getElementById('locInput').value.trim();
+  const box = document.getElementById('boxInput').value.trim();
   const msgEl = document.getElementById('saveMsg');
 
   if (!setNum) {
@@ -520,16 +564,17 @@ document.getElementById('sheetSave').addEventListener('click', async () => {
   msgEl.className = 'save-msg';
 
   await upsertSet(setNum, setName);
-  const ok = await saveCountEvent(setNum, qty, loc);
+  const ok = await saveCountEvent(setNum, qty, loc, box);
 
   if (ok) {
     msgEl.textContent = 'Saved!';
     msgEl.className = 'save-msg ok';
-    recentScans.unshift({ setNum, setName, qty, loc, time: new Date() });
+    recentScans.unshift({ setNum, setName, qty, loc, box, time: new Date() });
     sessionsToday++;
     unitsLogged += qty;
     updateStats();
     renderRecent();
+    if (box && !knownBoxLabels.includes(box)) knownBoxLabels.unshift(box);
     setTimeout(() => { document.getElementById('sheetBackdrop').classList.remove('show'); }, 600);
   } else {
     msgEl.textContent = 'Save failed — check your connection and try again.';
@@ -556,7 +601,7 @@ function renderRecent() {
       </div>
       <div class="recent-meta">
         <div>× ${s.qty}</div>
-        <div class="recent-loc">${s.loc || '—'}</div>
+        <div class="recent-loc">${s.loc || '—'}${s.box ? ' · ' + s.box : ''}</div>
       </div>
     </div>
   `).join('');
