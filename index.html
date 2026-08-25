@@ -50,6 +50,12 @@
   .brand { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--tag-yellow); font-weight: 700; }
   .logout-btn { font-size: 11px; color: var(--text-faint); background: none; border: none; cursor: pointer; text-decoration: underline; }
   .stats-row { display: flex; gap: 8px; }
+  .conn-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .conn-badge { font-size: 11px; font-family: var(--mono); padding: 3px 8px; border-radius: 12px; background: var(--bg-raised); border: 1px solid var(--card-border); }
+  .conn-badge.online { color: var(--green); }
+  .conn-badge.offline { color: var(--red-flag); }
+  .pending-badge { font-size: 11px; font-family: var(--mono); color: var(--tag-yellow); padding: 3px 8px; border-radius: 12px; background: rgba(255,201,74,0.1); border: 1px solid rgba(255,201,74,0.3); }
+  .sync-now-btn { font-size: 11px; padding: 3px 10px; border-radius: 12px; background: var(--tag-yellow); color: #1a1508; border: none; font-weight: 700; cursor: pointer; }
   .stat { flex: 1; background: var(--bg-raised); border: 1px solid var(--card-border); border-radius: 8px; padding: 8px 10px; }
   .stat-num { font-family: var(--mono); font-size: 18px; font-weight: 700; color: var(--text); line-height: 1.1; }
   .stat-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); margin-top: 2px; }
@@ -149,6 +155,11 @@
       <div class="brand">LEGO Scanner</div>
       <button class="logout-btn" id="logoutBtn">Sign out</button>
     </div>
+    <div class="conn-row">
+      <span id="connBadge" class="conn-badge online">🟢 Online</span>
+      <span id="pendingBadge" class="pending-badge hidden">⏳ 0 pending sync</span>
+      <button id="syncNowBtn" class="sync-now-btn hidden">Sync now</button>
+    </div>
     <div class="stats-row">
       <div class="stat"><div class="stat-num" id="statToday">0</div><div class="stat-label">Scanned Today</div></div>
       <div class="stat"><div class="stat-num" id="statUnits">0</div><div class="stat-label">Units Logged</div></div>
@@ -224,32 +235,46 @@ let sessionsToday = 0;
 let unitsLogged = 0;
 let recentScans = [];
 let currentUpc = null;
+let pendingQueue = [];
+let isOnline = navigator.onLine;
+
+// ---------------- Local storage helpers (real browser storage — works on any site) ----------------
+function lsGet(key) {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : null;
+  } catch (e) { return null; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+}
+function lsRemove(key) {
+  try { localStorage.removeItem(key); } catch (e) {}
+}
 
 // ---------------- Auth ----------------
-async function loadSession() {
-  try {
-    const stored = await window.storage.get('supabase_session', false);
-    if (stored && stored.value) {
-      const s = JSON.parse(stored.value);
-      if (s.expires_at > Date.now() / 1000) {
-        session = s;
-        showMain();
-        return;
-      } else if (s.refresh_token) {
-        const ok = await refreshSession(s.refresh_token);
-        if (ok) { showMain(); return; }
-      }
+function loadSession() {
+  const s = lsGet('lego_scanner_session');
+  if (s) {
+    // Use whatever we have, even if stale — offline capture doesn't need a live token.
+    session = s;
+    showMain();
+    // Try a background refresh if we're online and it's expired; don't block on it.
+    if (isOnline && s.expires_at < Date.now() / 1000) {
+      refreshSession(s.refresh_token);
     }
-  } catch (e) {}
+    return;
+  }
   showLogin();
 }
 
-async function saveSession(s) {
+function saveSession(s) {
   session = s;
-  try { await window.storage.set('supabase_session', JSON.stringify(s), false); } catch (e) {}
+  lsSet('lego_scanner_session', s);
 }
 
 async function refreshSession(refresh_token) {
+  if (!isOnline) return false;
   try {
     const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
       method: 'POST',
@@ -258,7 +283,7 @@ async function refreshSession(refresh_token) {
     });
     if (!res.ok) return false;
     const data = await res.json();
-    await saveSession({
+    saveSession({
       access_token: data.access_token,
       refresh_token: data.refresh_token,
       expires_at: Date.now() / 1000 + data.expires_in
@@ -277,7 +302,37 @@ function showMain() {
   refreshQuickLocs();
   updateStats();
   loadKnownBoxLabels();
+  loadPendingQueue();
+  updateConnBadge();
+  if (isOnline) syncPendingQueue();
 }
+
+function updateConnBadge() {
+  const badge = document.getElementById('connBadge');
+  if (isOnline) {
+    badge.textContent = '🟢 Online';
+    badge.className = 'conn-badge online';
+  } else {
+    badge.textContent = '🔴 Offline';
+    badge.className = 'conn-badge offline';
+  }
+}
+
+window.addEventListener('online', () => {
+  isOnline = true;
+  updateConnBadge();
+  syncPendingQueue();
+});
+window.addEventListener('offline', () => {
+  isOnline = false;
+  updateConnBadge();
+});
+
+document.getElementById('syncNowBtn').addEventListener('click', () => {
+  isOnline = navigator.onLine;
+  updateConnBadge();
+  if (isOnline) syncPendingQueue();
+});
 
 document.getElementById('loginBtn').addEventListener('click', async () => {
   const email = document.getElementById('loginEmail').value.trim();
@@ -285,6 +340,7 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
   const errEl = document.getElementById('loginError');
   errEl.textContent = '';
   if (!email || !password) { errEl.textContent = 'Enter email and password.'; return; }
+  if (!isOnline) { errEl.textContent = 'No connection — you need signal for your first sign-in.'; return; }
   try {
     const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
       method: 'POST',
@@ -293,7 +349,7 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
     });
     const data = await res.json();
     if (!res.ok) { errEl.textContent = data.error_description || data.msg || 'Sign-in failed.'; return; }
-    await saveSession({
+    saveSession({
       access_token: data.access_token,
       refresh_token: data.refresh_token,
       expires_at: Date.now() / 1000 + data.expires_in
@@ -302,31 +358,42 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
   } catch (e) { errEl.textContent = 'Network error. Try again.'; }
 });
 
-document.getElementById('logoutBtn').addEventListener('click', async () => {
-  try { await window.storage.delete('supabase_session', false); } catch (e) {}
+document.getElementById('logoutBtn').addEventListener('click', () => {
+  lsRemove('lego_scanner_session');
   session = null;
   showLogin();
 });
 
 // ---------------- Supabase REST helpers ----------------
+function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, Object.assign({}, options, { signal: controller.signal }))
+    .finally(() => clearTimeout(timer));
+}
+
 async function sbFetch(path, options = {}) {
   const headers = Object.assign({
     'apikey': SUPABASE_ANON_KEY,
     'Authorization': `Bearer ${session.access_token}`,
     'Content-Type': 'application/json'
   }, options.headers || {});
-  return fetch(`${SUPABASE_URL}/rest/v1/${path}`, Object.assign({}, options, { headers }));
+  return fetchWithTimeout(`${SUPABASE_URL}/rest/v1/${path}`, Object.assign({}, options, { headers }));
 }
 
 async function upsertSet(setNumber, name) {
-  await sbFetch('sets', {
-    method: 'POST',
-    headers: { 'Prefer': 'resolution=merge-duplicates' },
-    body: JSON.stringify([{ set_number: setNumber, name: name || setNumber }])
-  });
+  if (!isOnline) return;
+  try {
+    await sbFetch('sets', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify([{ set_number: setNumber, name: name || setNumber }])
+    });
+  } catch (e) {}
 }
 
 async function fetchPriorCount(setNumber) {
+  if (!isOnline) return null;
   try {
     const res = await sbFetch(`latest_physical_count?set_number=eq.${encodeURIComponent(setNumber)}&select=counted_qty,location,box_label,counted_at`);
     const data = await res.json();
@@ -335,6 +402,7 @@ async function fetchPriorCount(setNumber) {
 }
 
 async function fetchPurchasedQty(setNumber) {
+  if (!isOnline) return null;
   try {
     const res = await sbFetch(`inventory_status?set_number=eq.${encodeURIComponent(setNumber)}&select=total_purchased,name`);
     const data = await res.json();
@@ -343,22 +411,92 @@ async function fetchPurchasedQty(setNumber) {
 }
 
 async function saveCountEvent(setNumber, qty, location, boxLabel) {
-  const res = await sbFetch('physical_count_events', {
-    method: 'POST',
-    headers: { 'Prefer': 'return=representation' },
-    body: JSON.stringify([{
-      set_number: setNumber,
-      counted_qty: qty,
-      location: location || null,
-      box_label: boxLabel || null,
-      session_label: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    }])
+  const record = {
+    set_number: setNumber,
+    counted_qty: qty,
+    location: location || null,
+    box_label: boxLabel || null,
+    session_label: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  };
+
+  if (isOnline) {
+    try {
+      const res = await sbFetch('physical_count_events', {
+        method: 'POST',
+        headers: { 'Prefer': 'return=representation' },
+        body: JSON.stringify([record])
+      });
+      if (res.ok) return { ok: true, queued: false };
+    } catch (e) {
+      // fall through to offline queue
+    }
+  }
+
+  // Offline, or the network attempt failed — queue it locally so nothing is lost.
+  queueOffline(setNumber, record);
+  return { ok: true, queued: true };
+}
+
+function queueOffline(setNumber, record) {
+  pendingQueue.push({
+    local_id: Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+    set_number: setNumber,
+    set_name: document.getElementById('setNameInput').value.trim(),
+    record,
+    queued_at: Date.now()
   });
-  return res.ok;
+  lsSet('lego_scanner_pending_queue', pendingQueue);
+  updatePendingBadge();
+}
+
+function loadPendingQueue() {
+  pendingQueue = lsGet('lego_scanner_pending_queue') || [];
+  updatePendingBadge();
+}
+
+async function syncPendingQueue() {
+  if (!isOnline || pendingQueue.length === 0 || !session) return;
+  // Refresh the token first if it looks stale, so the sync doesn't fail on auth.
+  if (session.expires_at < Date.now() / 1000) {
+    await refreshSession(session.refresh_token);
+  }
+  const stillPending = [];
+  for (const item of pendingQueue) {
+    try {
+      await upsertSet(item.set_number, item.set_name);
+      const res = await sbFetch('physical_count_events', {
+        method: 'POST',
+        headers: { 'Prefer': 'return=representation' },
+        body: JSON.stringify([item.record])
+      });
+      if (!res.ok) stillPending.push(item);
+    } catch (e) {
+      stillPending.push(item);
+    }
+  }
+  pendingQueue = stillPending;
+  lsSet('lego_scanner_pending_queue', pendingQueue);
+  updatePendingBadge();
+  renderRecent();
+}
+
+function updatePendingBadge() {
+  const el = document.getElementById('pendingBadge');
+  const syncBtn = document.getElementById('syncNowBtn');
+  if (!el) return;
+  if (pendingQueue.length > 0) {
+    el.textContent = `⏳ ${pendingQueue.length} pending sync`;
+    el.classList.remove('hidden');
+    syncBtn.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+    syncBtn.classList.add('hidden');
+  }
 }
 
 let knownBoxLabels = [];
 async function loadKnownBoxLabels() {
+  if (!isOnline) { knownBoxLabels = []; return; }
   try {
     const res = await sbFetch('physical_count_events?select=box_label&box_label=not.is.null&order=counted_at.desc&limit=200');
     const data = await res.json();
@@ -388,13 +526,14 @@ function extractSetNumber(title) {
 }
 
 async function lookupUpc(upc) {
+  if (!isOnline) return null;
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/upc-lookup?upc=${encodeURIComponent(upc)}`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/functions/v1/upc-lookup?upc=${encodeURIComponent(upc)}`, {
       headers: {
         'apikey': SUPABASE_ANON_KEY,
         'Authorization': `Bearer ${session.access_token}`
       }
-    });
+    }, 5000);
     if (!res.ok) return null;
     const data = await res.json();
     if (data.items && data.items.length > 0) {
@@ -471,21 +610,25 @@ async function openResultSheet(upc) {
 
   if (upc) {
     const statusEl = document.getElementById('lookupStatus');
-    statusEl.innerHTML = '<span class="spinner"></span> Looking up product…';
-    const result = await lookupUpc(upc);
-    if (result) {
-      const setNum = extractSetNumber(result.title);
-      if (setNum) {
-        document.getElementById('setNumInput').value = setNum;
-        document.getElementById('setNameInput').value = result.title.replace(/^LEGO[®\s]*/i, '').slice(0, 80);
-        statusEl.textContent = '✓ Found: ' + result.title.slice(0, 60);
-        checkPrior(setNum);
-      } else {
-        statusEl.textContent = 'Found a product but no set number in the title — check below.';
-        document.getElementById('setNameInput').value = result.title.slice(0, 80);
-      }
+    if (!isOnline) {
+      statusEl.textContent = '📴 Offline — enter the set number manually below.';
     } else {
-      statusEl.textContent = 'No match found online — enter the set number manually.';
+      statusEl.innerHTML = '<span class="spinner"></span> Looking up product…';
+      const result = await lookupUpc(upc);
+      if (result) {
+        const setNum = extractSetNumber(result.title);
+        if (setNum) {
+          document.getElementById('setNumInput').value = setNum;
+          document.getElementById('setNameInput').value = result.title.replace(/^LEGO[®\s]*/i, '').slice(0, 80);
+          statusEl.textContent = '✓ Found: ' + result.title.slice(0, 60);
+          checkPrior(setNum);
+        } else {
+          statusEl.textContent = 'Found a product but no set number in the title — check below.';
+          document.getElementById('setNameInput').value = result.title.slice(0, 80);
+        }
+      } else {
+        statusEl.textContent = 'No match found online — enter the set number manually.';
+      }
     }
   } else {
     document.getElementById('lookupStatus').textContent = '';
@@ -569,18 +712,18 @@ document.getElementById('sheetSave').addEventListener('click', async () => {
   msgEl.className = 'save-msg';
 
   await upsertSet(setNum, setName);
-  const ok = await saveCountEvent(setNum, qty, loc, box);
+  const result = await saveCountEvent(setNum, qty, loc, box);
 
-  if (ok) {
-    msgEl.textContent = 'Saved!';
-    msgEl.className = 'save-msg ok';
-    recentScans.unshift({ setNum, setName, qty, loc, box, time: new Date() });
+  if (result.ok) {
+    msgEl.textContent = result.queued ? '📴 Saved locally — will sync when back online.' : 'Saved!';
+    msgEl.className = result.queued ? 'save-msg' : 'save-msg ok';
+    recentScans.unshift({ setNum, setName, qty, loc, box, time: new Date(), queued: result.queued });
     sessionsToday++;
     unitsLogged += qty;
     updateStats();
     renderRecent();
     if (box && !knownBoxLabels.includes(box)) knownBoxLabels.unshift(box);
-    setTimeout(() => { document.getElementById('sheetBackdrop').classList.remove('show'); }, 600);
+    setTimeout(() => { document.getElementById('sheetBackdrop').classList.remove('show'); }, 700);
   } else {
     msgEl.textContent = 'Save failed — check your connection and try again.';
     msgEl.className = 'save-msg err';
@@ -601,7 +744,7 @@ function renderRecent() {
   list.innerHTML = recentScans.map(s => `
     <div class="recent-item">
       <div>
-        <div class="recent-set">${s.setNum}</div>
+        <div class="recent-set">${s.setNum} ${s.queued ? '<span style="color:var(--tag-yellow);font-size:11px;">⏳ pending</span>' : ''}</div>
         <div class="recent-name">${s.setName || ''}</div>
       </div>
       <div class="recent-meta">
