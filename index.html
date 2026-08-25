@@ -79,7 +79,7 @@
   #interactive video, #interactive canvas { width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0; }
   .scan-frame {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
-    width: 82%; height: 90px; border: 2px solid var(--tag-yellow); border-radius: 10px;
+    width: 82%; height: 150px; border: 2px solid var(--tag-yellow); border-radius: 10px;
     box-shadow: 0 0 0 2000px rgba(0,0,0,0.45); pointer-events: none;
   }
   .camera-bar { padding: 16px; display: flex; gap: 10px; background: #000; }
@@ -548,16 +548,25 @@ async function lookupUpc(upc) {
 
 // ---------------- Camera / scanning ----------------
 let scannerRunning = false;
+let detectionBuffer = {}; // code -> array of timestamps seen
 
 function startCamera() {
   document.getElementById('cameraOverlay').classList.remove('hidden');
+  document.querySelector('.camera-hint').textContent = 'Align barcode within the frame';
+  detectionBuffer = {};
   Quagga.init({
     inputStream: {
       type: 'LiveStream',
       target: document.querySelector('#interactive'),
-      constraints: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+      constraints: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      // Only analyze the region inside the visual guide box — faster, and stops it
+      // from picking up stray numbers/other barcodes elsewhere in the camera view.
+      area: { top: '32%', right: '9%', left: '9%', bottom: '32%' }
     },
-    decoder: { readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader'] },
+    decoder: { readers: ['upc_reader', 'ean_reader'], multiple: false },
+    locator: { patchSize: 'medium', halfSample: true },
+    numOfWorkers: navigator.hardwareConcurrency ? Math.min(navigator.hardwareConcurrency, 4) : 2,
+    frequency: 10,
     locate: true
   }, function(err) {
     if (err) {
@@ -581,9 +590,30 @@ function closeCamera() {
   document.getElementById('cameraOverlay').classList.add('hidden');
 }
 
+// Require the same code to be read 3 times within ~1.5s before accepting it.
+// A single garbled read can pass Quagga's own decode step without actually
+// matching the barcode — this filters those out without needing the user
+// to hold perfectly still for a "clean" single read.
+const CONFIRM_COUNT = 3;
+const CONFIRM_WINDOW_MS = 1500;
+
 function onBarcodeDetected(result) {
   const code = result.codeResult.code;
   if (!code) return;
+
+  const now = Date.now();
+  if (!detectionBuffer[code]) detectionBuffer[code] = [];
+  detectionBuffer[code].push(now);
+  detectionBuffer[code] = detectionBuffer[code].filter(t => now - t < CONFIRM_WINDOW_MS);
+
+  const hint = document.querySelector('.camera-hint');
+  const seen = detectionBuffer[code].length;
+  if (seen < CONFIRM_COUNT) {
+    if (hint) hint.textContent = `Confirming… (${seen}/${CONFIRM_COUNT})`;
+    return;
+  }
+
+  detectionBuffer = {};
   closeCamera();
   openResultSheet(code);
 }
