@@ -595,6 +595,10 @@ document.getElementById('manualBtn').addEventListener('click', () => openResultS
 // ---------------- Result sheet ----------------
 async function openResultSheet(upc) {
   currentUpc = upc;
+  isSaving = false;
+  const saveBtn = document.getElementById('sheetSave');
+  saveBtn.disabled = false;
+  saveBtn.style.opacity = '1';
   document.getElementById('scannedUpc').textContent = upc || 'Manual entry';
   document.getElementById('setNumInput').value = '';
   document.getElementById('setNameInput').value = '';
@@ -694,7 +698,10 @@ document.getElementById('sheetCancel').addEventListener('click', () => {
   document.getElementById('sheetBackdrop').classList.remove('show');
 });
 
+let isSaving = false;
 document.getElementById('sheetSave').addEventListener('click', async () => {
+  if (isSaving) return; // block double-taps while a save is already in flight
+  const saveBtn = document.getElementById('sheetSave');
   const setNum = document.getElementById('setNumInput').value.trim();
   const setName = document.getElementById('setNameInput').value.trim();
   const qty = parseInt(document.getElementById('qtyInput').value, 10) || 0;
@@ -708,6 +715,9 @@ document.getElementById('sheetSave').addEventListener('click', async () => {
     return;
   }
 
+  isSaving = true;
+  saveBtn.disabled = true;
+  saveBtn.style.opacity = '0.5';
   msgEl.textContent = 'Saving…';
   msgEl.className = 'save-msg';
 
@@ -728,6 +738,10 @@ document.getElementById('sheetSave').addEventListener('click', async () => {
     msgEl.textContent = 'Save failed — check your connection and try again.';
     msgEl.className = 'save-msg err';
   }
+
+  isSaving = false;
+  saveBtn.disabled = false;
+  saveBtn.style.opacity = '1';
 });
 
 function updateStats() {
