@@ -128,13 +128,25 @@
   .recent-list { padding: 0 12px 100px; }
   .recent-item {
     background: var(--card); border: 1px solid var(--card-border); border-radius: 10px;
-    margin-bottom: 8px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px; padding: 12px 14px; display: flex; align-items: center; gap: 8px;
   }
+  .recent-item-main { display: flex; justify-content: space-between; align-items: center; flex: 1; min-width: 0; }
+  .recent-del { background: none; border: none; color: var(--text-faint); font-size: 17px; padding: 6px; cursor: pointer; flex-shrink: 0; }
+  .recent-del:active { color: var(--red-flag); }
   .recent-set { font-family: var(--mono); font-weight: 700; color: var(--tag-yellow); font-size: 15px; }
   .recent-name { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
   .recent-meta { text-align: right; font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
   .recent-loc { color: var(--blue); }
   .empty-hint { text-align: center; color: var(--text-faint); padding: 40px 20px; font-size: 13px; }
+  .move-from-list { margin-top: 6px; }
+  .move-from-option {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px; border-radius: 9px; border: 1px solid var(--card-border);
+    background: var(--bg); margin-bottom: 6px; cursor: pointer;
+  }
+  .move-from-option.active { border-color: var(--tag-yellow); background: rgba(255,201,74,0.08); }
+  .move-from-main { font-family: var(--mono); font-size: 13.5px; color: var(--text); }
+  .move-from-qty { font-family: var(--mono); font-size: 13px; color: var(--tag-yellow); font-weight: 700; }
 </style>
 </head>
 <body>
@@ -169,6 +181,7 @@
   <div class="scan-wrap">
     <button class="scan-btn" id="scanBtn"><span class="icon">📷</span> Scan Barcode</button>
     <button class="manual-btn" id="manualBtn">＋ Enter a set manually instead</button>
+    <button class="manual-btn" id="moveBtn">🔀 Move a set to a different box</button>
   </div>
 
   <div class="recent-header">Recent scans (this session)</div>
@@ -222,6 +235,44 @@
       <button class="sheet-btn save" id="sheetSave">Save Count</button>
     </div>
     <div class="save-msg" id="saveMsg"></div>
+  </div>
+</div>
+
+<!-- MOVE SHEET -->
+<div class="sheet-backdrop" id="moveBackdrop">
+  <div class="sheet">
+    <div class="sheet-title">Move to a different box</div>
+    <div class="field-label">LEGO set number</div>
+    <input class="field-input" id="moveSetNumInput" placeholder="e.g. 75318" inputmode="numeric">
+
+    <div class="field-label">Currently in</div>
+    <div id="moveFromOptions" class="move-from-list">
+      <div class="empty-hint" style="padding:12px 0;">Enter a set number above to see its boxes.</div>
+    </div>
+
+    <div id="moveDetailsSection" class="hidden">
+      <div class="field-label">Quantity to move</div>
+      <div class="stepper">
+        <button class="stepper-btn" id="moveQtyDown">−</button>
+        <input class="stepper-input" id="moveQtyInput" type="number" inputmode="numeric" value="1">
+        <button class="stepper-btn" id="moveQtyUp">+</button>
+      </div>
+      <div class="prior-hint" id="moveQtyHint"></div>
+
+      <div class="field-label">Move to — location</div>
+      <input class="field-input" id="moveToLocInput" placeholder="e.g. 3269, or BC1">
+      <div class="quick-locs" id="moveQuickLocs"></div>
+
+      <div class="field-label">Move to — box / bin label</div>
+      <input class="field-input" id="moveToBoxInput" placeholder="e.g. Spider2">
+      <div class="quick-locs" id="moveQuickBoxes"></div>
+    </div>
+
+    <div class="sheet-row">
+      <button class="sheet-btn cancel" id="moveCancel">Cancel</button>
+      <button class="sheet-btn save" id="moveSave">Record Move</button>
+    </div>
+    <div class="save-msg" id="moveSaveMsg"></div>
   </div>
 </div>
 
@@ -410,12 +461,15 @@ async function fetchPurchasedQty(setNumber) {
   } catch (e) { return null; }
 }
 
-async function saveCountEvent(setNumber, qty, location, boxLabel) {
+async function saveCountEvent(setNumber, setName, qty, location, boxLabel, eventType = 'count', fromLocation = null, fromBoxLabel = null) {
   const record = {
     set_number: setNumber,
     counted_qty: qty,
     location: location || null,
     box_label: boxLabel || null,
+    event_type: eventType,
+    from_location: fromLocation,
+    from_box_label: fromBoxLabel,
     session_label: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
   };
 
@@ -426,27 +480,33 @@ async function saveCountEvent(setNumber, qty, location, boxLabel) {
         headers: { 'Prefer': 'return=representation' },
         body: JSON.stringify([record])
       });
-      if (res.ok) return { ok: true, queued: false };
+      if (res.ok) {
+        const data = await res.json();
+        const dbId = data && data[0] ? data[0].id : null;
+        return { ok: true, queued: false, dbId };
+      }
     } catch (e) {
       // fall through to offline queue
     }
   }
 
   // Offline, or the network attempt failed — queue it locally so nothing is lost.
-  queueOffline(setNumber, record);
-  return { ok: true, queued: true };
+  const localId = queueOffline(setNumber, setName, record);
+  return { ok: true, queued: true, localId };
 }
 
-function queueOffline(setNumber, record) {
+function queueOffline(setNumber, setName, record) {
+  const local_id = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   pendingQueue.push({
-    local_id: Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+    local_id,
     set_number: setNumber,
-    set_name: document.getElementById('setNameInput').value.trim(),
+    set_name: setName || '',
     record,
     queued_at: Date.now()
   });
   lsSet('lego_scanner_pending_queue', pendingQueue);
   updatePendingBadge();
+  return local_id;
 }
 
 function loadPendingQueue() {
@@ -469,7 +529,14 @@ async function syncPendingQueue() {
         headers: { 'Prefer': 'return=representation' },
         body: JSON.stringify([item.record])
       });
-      if (!res.ok) stillPending.push(item);
+      if (res.ok) {
+        const data = await res.json();
+        const dbId = data && data[0] ? data[0].id : null;
+        const match = recentScans.find(s => s.localId === item.local_id);
+        if (match) { match.queued = false; match.dbId = dbId; match.localId = null; }
+      } else {
+        stillPending.push(item);
+      }
     } catch (e) {
       stillPending.push(item);
     }
@@ -752,12 +819,12 @@ document.getElementById('sheetSave').addEventListener('click', async () => {
   msgEl.className = 'save-msg';
 
   await upsertSet(setNum, setName);
-  const result = await saveCountEvent(setNum, qty, loc, box);
+  const result = await saveCountEvent(setNum, setName, qty, loc, box);
 
   if (result.ok) {
     msgEl.textContent = result.queued ? '📴 Saved locally — will sync when back online.' : 'Saved!';
     msgEl.className = result.queued ? 'save-msg' : 'save-msg ok';
-    recentScans.unshift({ setNum, setName, qty, loc, box, time: new Date(), queued: result.queued });
+    recentScans.unshift({ setNum, setName, qty, loc, box, time: new Date(), queued: result.queued, dbId: result.dbId, localId: result.localId });
     sessionsToday++;
     unitsLogged += qty;
     updateStats();
@@ -785,19 +852,204 @@ function renderRecent() {
     list.innerHTML = '<div class="empty-hint">Nothing scanned yet — tap "Scan Barcode" to start.</div>';
     return;
   }
-  list.innerHTML = recentScans.map(s => `
+  list.innerHTML = recentScans.map((s, i) => `
     <div class="recent-item">
-      <div>
-        <div class="recent-set">${s.setNum} ${s.queued ? '<span style="color:var(--tag-yellow);font-size:11px;">⏳ pending</span>' : ''}</div>
-        <div class="recent-name">${s.setName || ''}</div>
+      <div class="recent-item-main">
+        <div>
+          <div class="recent-set">${s.setNum} ${s.queued ? '<span style="color:var(--tag-yellow);font-size:11px;">⏳ pending</span>' : ''} ${s.moveType ? '<span style="color:var(--blue);font-size:11px;">🔀 moved</span>' : ''}</div>
+          <div class="recent-name">${s.setName || ''}</div>
+        </div>
+        <div class="recent-meta">
+          <div>× ${s.qty}</div>
+          <div class="recent-loc">${s.loc || '—'}${s.box ? ' · ' + s.box : ''}</div>
+        </div>
       </div>
-      <div class="recent-meta">
-        <div>× ${s.qty}</div>
-        <div class="recent-loc">${s.loc || '—'}${s.box ? ' · ' + s.box : ''}</div>
-      </div>
+      <button class="recent-del" data-idx="${i}" title="Remove this entry">🗑</button>
     </div>
   `).join('');
+  list.querySelectorAll('.recent-del').forEach(btn => {
+    btn.addEventListener('click', () => deleteRecentEntry(parseInt(btn.getAttribute('data-idx'), 10)));
+  });
 }
+
+async function deleteRecentEntry(index) {
+  const entry = recentScans[index];
+  if (!entry) return;
+  const label = `${entry.setNum} × ${entry.qty}${entry.loc ? ' @ ' + entry.loc : ''}`;
+  if (!confirm(`Remove this entry?\n\n${label}\n\nThis only removes it from your data — it won't affect anything scanned in a past session.`)) return;
+
+  if (entry.queued && entry.localId) {
+    // Still offline-queued — never reached the database, just drop it locally.
+    pendingQueue = pendingQueue.filter(p => p.local_id !== entry.localId);
+    lsSet('lego_scanner_pending_queue', pendingQueue);
+    updatePendingBadge();
+  } else if (entry.dbId) {
+    if (!isOnline) { alert('You need a connection to delete a synced entry. Try again once you have signal.'); return; }
+    try {
+      const res = await sbFetch(`physical_count_events?id=eq.${entry.dbId}`, { method: 'DELETE' });
+      if (!res.ok) { alert('Delete failed — try again.'); return; }
+    } catch (e) {
+      alert('Delete failed — check your connection and try again.');
+      return;
+    }
+  }
+
+  recentScans.splice(index, 1);
+  sessionsToday = Math.max(0, sessionsToday - 1);
+  unitsLogged = Math.max(0, unitsLogged - entry.qty);
+  updateStats();
+  renderRecent();
+}
+
+// ---------------- Move to different box ----------------
+let selectedFromBox = null;
+let isMoveSaving = false;
+
+document.getElementById('moveBtn').addEventListener('click', openMoveSheet);
+
+function openMoveSheet() {
+  document.getElementById('moveSetNumInput').value = '';
+  document.getElementById('moveFromOptions').innerHTML = '<div class="empty-hint" style="padding:12px 0;">Enter a set number above to see its boxes.</div>';
+  document.getElementById('moveDetailsSection').classList.add('hidden');
+  document.getElementById('moveSaveMsg').textContent = '';
+  document.getElementById('moveSaveMsg').className = 'save-msg';
+  selectedFromBox = null;
+  document.getElementById('moveBackdrop').classList.add('show');
+}
+
+document.getElementById('moveCancel').addEventListener('click', () => {
+  document.getElementById('moveBackdrop').classList.remove('show');
+});
+document.getElementById('moveBackdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'moveBackdrop') document.getElementById('moveBackdrop').classList.remove('show');
+});
+
+document.getElementById('moveSetNumInput').addEventListener('blur', loadMoveFromOptions);
+
+async function loadMoveFromOptions() {
+  const setNum = document.getElementById('moveSetNumInput').value.trim();
+  const wrap = document.getElementById('moveFromOptions');
+  document.getElementById('moveDetailsSection').classList.add('hidden');
+  selectedFromBox = null;
+  if (!setNum) {
+    wrap.innerHTML = '<div class="empty-hint" style="padding:12px 0;">Enter a set number above to see its boxes.</div>';
+    return;
+  }
+  if (!isOnline) {
+    wrap.innerHTML = '<div class="empty-hint" style="padding:12px 0;">📴 Offline — looking up existing boxes needs a connection. You can still note the move by scanning it into the new box as a regular count.</div>';
+    return;
+  }
+  wrap.innerHTML = '<div class="lookup-status"><span class="spinner"></span> Looking up boxes…</div>';
+  try {
+    const res = await sbFetch(`latest_physical_count?set_number=eq.${encodeURIComponent(setNum)}&counted_qty=gt.0&select=location,box_label,counted_qty&order=counted_qty.desc`);
+    const data = await res.json();
+    if (!data.length) {
+      wrap.innerHTML = '<div class="empty-hint" style="padding:12px 0;">No tracked boxes found for this set yet — count it in first before moving it.</div>';
+      return;
+    }
+    wrap.innerHTML = data.map((row, i) => `
+      <div class="move-from-option" data-idx="${i}">
+        <div class="move-from-main">${row.location || '(no location)'}${row.box_label ? ' — ' + row.box_label : ''}</div>
+        <div class="move-from-qty">× ${row.counted_qty}</div>
+      </div>
+    `).join('');
+    wrap.querySelectorAll('.move-from-option').forEach((el, i) => {
+      el.addEventListener('click', () => selectFromBox(data[i], el));
+    });
+  } catch (e) {
+    wrap.innerHTML = '<div class="empty-hint" style="padding:12px 0;">Lookup failed — check your connection.</div>';
+  }
+}
+
+function selectFromBox(row, el) {
+  selectedFromBox = row;
+  document.querySelectorAll('.move-from-option').forEach(x => x.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('moveDetailsSection').classList.remove('hidden');
+  document.getElementById('moveQtyInput').value = row.counted_qty;
+  document.getElementById('moveQtyHint').textContent = `${row.counted_qty} currently in this box`;
+  document.getElementById('moveToLocInput').value = '';
+  document.getElementById('moveToBoxInput').value = '';
+
+  const locWrap = document.getElementById('moveQuickLocs');
+  locWrap.innerHTML = QUICK_LOCATIONS.map(l => `<span class="quick-loc" data-val="${l}">${l}</span>`).join('');
+  locWrap.querySelectorAll('.quick-loc').forEach(x => x.addEventListener('click', () => {
+    document.getElementById('moveToLocInput').value = x.getAttribute('data-val');
+  }));
+
+  const boxWrap = document.getElementById('moveQuickBoxes');
+  boxWrap.innerHTML = knownBoxLabels.map(l => `<span class="quick-loc" data-val="${l}">${l}</span>`).join('');
+  boxWrap.querySelectorAll('.quick-loc').forEach(x => x.addEventListener('click', () => {
+    document.getElementById('moveToBoxInput').value = x.getAttribute('data-val');
+  }));
+}
+
+document.getElementById('moveQtyDown').addEventListener('click', () => {
+  const inp = document.getElementById('moveQtyInput');
+  inp.value = Math.max(1, (parseInt(inp.value, 10) || 1) - 1);
+});
+document.getElementById('moveQtyUp').addEventListener('click', () => {
+  const inp = document.getElementById('moveQtyInput');
+  const max = selectedFromBox ? selectedFromBox.counted_qty : 999999;
+  inp.value = Math.min(max, (parseInt(inp.value, 10) || 1) + 1);
+});
+
+document.getElementById('moveSave').addEventListener('click', async () => {
+  if (isMoveSaving) return;
+  const setNum = document.getElementById('moveSetNumInput').value.trim();
+  const msgEl = document.getElementById('moveSaveMsg');
+
+  if (!setNum || !selectedFromBox) {
+    msgEl.textContent = "Select which box you're moving from.";
+    msgEl.className = 'save-msg err';
+    return;
+  }
+  const qtyMoved = parseInt(document.getElementById('moveQtyInput').value, 10) || 0;
+  if (qtyMoved <= 0 || qtyMoved > selectedFromBox.counted_qty) {
+    msgEl.textContent = 'Enter a valid quantity (up to what\'s in that box).';
+    msgEl.className = 'save-msg err';
+    return;
+  }
+  const toLoc = document.getElementById('moveToLocInput').value.trim();
+  const toBox = document.getElementById('moveToBoxInput').value.trim();
+  if (!toLoc && !toBox) {
+    msgEl.textContent = "Enter where it's moving to.";
+    msgEl.className = 'save-msg err';
+    return;
+  }
+
+  isMoveSaving = true;
+  const saveBtn = document.getElementById('moveSave');
+  saveBtn.disabled = true;
+  saveBtn.style.opacity = '0.5';
+  msgEl.textContent = 'Recording move…';
+  msgEl.className = 'save-msg';
+
+  const remaining = selectedFromBox.counted_qty - qtyMoved;
+  // Two events: update what's left in the old box, and record the arrival at the new one
+  // (with from_location/from_box_label kept for a clear audit trail of the move).
+  const r1 = await saveCountEvent(setNum, '', remaining, selectedFromBox.location, selectedFromBox.box_label, 'count');
+  const r2 = await saveCountEvent(setNum, '', qtyMoved, toLoc, toBox, 'move', selectedFromBox.location, selectedFromBox.box_label);
+
+  if (r1.ok && r2.ok) {
+    const queued = r1.queued || r2.queued;
+    msgEl.textContent = queued ? '📴 Saved locally — will sync when back online.' : 'Move recorded!';
+    msgEl.className = queued ? 'save-msg' : 'save-msg ok';
+    recentScans.unshift({
+      setNum, setName: '', qty: qtyMoved, loc: toLoc, box: toBox,
+      time: new Date(), queued: r2.queued, dbId: r2.dbId, localId: r2.localId, moveType: true
+    });
+    renderRecent();
+    setTimeout(() => { document.getElementById('moveBackdrop').classList.remove('show'); }, 800);
+  } else {
+    msgEl.textContent = 'Move failed — check your connection and try again.';
+    msgEl.className = 'save-msg err';
+  }
+
+  isMoveSaving = false;
+  saveBtn.disabled = false;
+  saveBtn.style.opacity = '1';
+});
 
 loadSession();
 </script>
