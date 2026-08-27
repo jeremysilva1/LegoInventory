@@ -434,12 +434,24 @@ async function sbFetch(path, options = {}) {
 
 async function upsertSet(setNumber, name) {
   if (!isOnline) return;
+  const hasRealName = name && name.trim() && name.trim() !== setNumber;
   try {
-    await sbFetch('sets', {
-      method: 'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates' },
-      body: JSON.stringify([{ set_number: setNumber, name: name || setNumber }])
-    });
+    if (hasRealName) {
+      // We have a real name — safe to write it (also fixes a placeholder if one existed).
+      await sbFetch('sets', {
+        method: 'POST',
+        headers: { 'Prefer': 'resolution=merge-duplicates' },
+        body: JSON.stringify([{ set_number: setNumber, name: name.trim() }])
+      });
+    } else {
+      // No real name available — only insert if this set is brand new.
+      // Never overwrite an existing name with a blank/placeholder.
+      const existing = await sbFetch(`sets?set_number=eq.${encodeURIComponent(setNumber)}&select=set_number`);
+      const rows = await existing.json();
+      if (!rows || rows.length === 0) {
+        await sbFetch('sets', { method: 'POST', body: JSON.stringify([{ set_number: setNumber, name: setNumber }]) });
+      }
+    }
   } catch (e) {}
 }
 
@@ -752,7 +764,7 @@ async function checkPrior(setNum) {
     parts.push(`last counted ${prior.counted_qty}${where}`);
   }
   document.getElementById('priorHint').textContent = parts.join(' · ') || 'No prior history for this set.';
-  if (!document.getElementById('setNameInput').value && purchased && purchased.name && purchased.name !== 'LEGO') {
+  if (!document.getElementById('setNameInput').value && purchased && purchased.name && purchased.name !== 'LEGO' && purchased.name !== setNum) {
     document.getElementById('setNameInput').value = purchased.name;
   }
 }
