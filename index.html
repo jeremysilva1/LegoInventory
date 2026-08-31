@@ -633,6 +633,7 @@ function startCamera() {
   document.getElementById('cameraOverlay').classList.remove('hidden');
   document.querySelector('.camera-hint').textContent = 'Align barcode within the frame';
   detectionBuffer = {};
+  barcodeAccepted = false;
   Quagga.init({
     inputStream: {
       type: 'LiveStream',
@@ -675,8 +676,11 @@ function closeCamera() {
 // to hold perfectly still for a "clean" single read.
 const CONFIRM_COUNT = 3;
 const CONFIRM_WINDOW_MS = 1500;
+let barcodeAccepted = false; // one-shot lock: prevents a racing/duplicate Quagga
+                              // detection event from accepting the same scan twice
 
 function onBarcodeDetected(result) {
+  if (barcodeAccepted || !scannerRunning) return; // already handled this scan — ignore any late/duplicate event
   const code = result.codeResult.code;
   if (!code) return;
 
@@ -692,6 +696,7 @@ function onBarcodeDetected(result) {
     return;
   }
 
+  barcodeAccepted = true; // lock immediately — nothing else from this scan can get through
   detectionBuffer = {};
   closeCamera();
   openResultSheet(code);
